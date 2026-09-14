@@ -1,0 +1,178 @@
+# ===========================================================================
+# Seki Capital - dataset generation parameters
+#
+# Every knob that shapes the dataset lives here. generate_data.py reads this
+# file with tomllib (Python 3.11+, standard library - no dependencies).
+#
+#     python3 generate_data.py                          # uses this file
+#     python3 generate_data.py --config scenarios/large.toml
+#     python3 generate_data.py --clients 500            # CLI beats the file
+#
+# Reference data - the 67 instruments, the five documented hub clients, the
+# name pools - is NOT here. That is fixture data, not parameters, and it
+# stays in generate_data.py where it reads as a table.
+#
+# Determinism note: the generator consumes randomness in the order these
+# values are read, so REORDERING the keys in a table (countries, segments,
+# currencies) changes the dataset even when the seed is unchanged. Change
+# values freely; reorder only when you mean to.
+# ===========================================================================
+
+[run]
+seed           = 20260910   # any int; a different one gives a different but equally valid dataset
+start_date     = 2024-01-01
+end_date       = 2026-09-09
+clients        = 120        # override: --clients
+trades_per_day = 65         # mean before seasonality; override: --trades-per-day
+out_dir        = "data"     # override: --out
+
+
+# ---------------------------------------------------------------------------
+# Price model: market factor + sector factor + per-security idiosyncratic noise
+# ---------------------------------------------------------------------------
+[market]
+base_vol         = 0.0060   # steady-state daily vol of the market factor
+vol_persistence  = 0.92     # AR(1) weight - higher means longer volatility clusters
+vol_cap          = 0.024    # hard ceiling on daily vol
+drift            = 0.00032  # daily market drift outside drawdowns (~9% annualised)
+sector_vol       = 0.0045   # daily sd of each sector factor
+sector_loading   = 0.65     # how much of the sector factor a security absorbs
+beta_min         = 0.60     # per-security market beta is drawn uniformly in
+beta_max         = 1.55     #   [beta_min, beta_max]
+idio_vol_min     = 0.007    # per-security idiosyncratic daily vol, uniform in
+idio_vol_max     = 0.016    #   [idio_vol_min, idio_vol_max]
+alpha_mean       = 0.00002  # small per-security drift; most return should come
+alpha_sd         = 0.00012  #   from the market and sector factors
+daily_return_cap = 0.16     # clamp on any single-day return, up or down
+open_gap_factor  = 0.45     # overnight gap sd, as a fraction of idio_vol
+high_low_noise   = 0.0045   # sd of the wick beyond max(open, close)
+
+# Engineered drawdowns, so the charts have something to show. Each window
+# replaces the drift and scales that day's volatility.
+[market.shock]
+drift          = -0.0018
+vol_multiplier = 1.8
+
+[[market.shock.windows]]
+start         = 2024-08-01
+trading_days  = 18
+
+[[market.shock.windows]]
+start         = 2025-04-07
+trading_days  = 25
+
+[[market.shock.windows]]
+start         = 2026-02-16
+trading_days  = 14
+
+# Daily volume by instrument size tier (tier is set per security in the code).
+# Volume rises with the absolute return of the day.
+[market.volume]
+tier_1             = 1_400_000
+tier_2             = 9_000_000
+tier_3             = 36_000_000
+noise_sd           = 0.35
+return_sensitivity = 5.5
+
+
+# ---------------------------------------------------------------------------
+# FX: a mean-reverting random walk per currency, into USD
+# ---------------------------------------------------------------------------
+[fx]
+mean_reversion = 0.004      # daily pull back towards the base rate
+
+[fx.base]                   # USD must be present and exactly 1.0 (check #5)
+USD = 1.0
+EUR = 1.08
+GBP = 1.27
+CHF = 1.12
+JPY = 0.0067
+
+[fx.vol]                    # daily sd of the log change; USD is pinned at 0
+USD = 0.0
+EUR = 0.0045
+GBP = 0.0050
+CHF = 0.0040
+JPY = 0.0055
+
+
+# ---------------------------------------------------------------------------
+# The client book
+# ---------------------------------------------------------------------------
+[clients]
+dormant_rate = 0.07         # share of clients that never trade (LEFT JOIN demo)
+onboard_from = 2012-01-01   # onboarding dates are drawn uniformly in this window
+onboard_to   = 2025-12-31
+
+[clients.countries]         # relative weights, not percentages
+FR = 22
+DE = 16
+CH = 12
+LU = 9
+GB = 11
+NL = 7
+IT = 6
+ES = 5
+BE = 4
+US = 4
+SE = 2
+DK = 2
+
+[clients.segments]
+Institutional = 40
+Private       = 38
+Wholesale     = 22
+
+# Book size is lognormal: exp(gauss(centre, sigma)), capped. Internal only -
+# it drives ticket sizing and activity, and is never exported as a column.
+[clients.aum]
+sigma   = 0.85
+cap_usd = 4.5e9
+
+[clients.aum.centre]
+Institutional = 19.9
+Wholesale     = 19.0
+Private       = 17.9
+
+# Each client invests in a sampled mandate rather than the whole universe,
+# so books stay concentrated. [min, max] instruments per segment.
+[clients.mandate]
+Institutional = [14, 26]
+Wholesale     = [10, 20]
+Private       = [6, 14]
+
+
+# ---------------------------------------------------------------------------
+# Trading activity
+# ---------------------------------------------------------------------------
+[trades]
+sell_probability = 0.38     # chance a client with a position sells rather than buys
+sell_fractions   = [0.25, 0.33, 0.5, 0.5, 1.0]   # drawn uniformly; 1.0 closes out
+ticket_frac_min  = 0.0006   # BUY ticket as a fraction of the client's book
+ticket_frac_max  = 0.0055
+min_ticket_usd   = 5_000.0  # nobody sends an odd-lot order to the market
+slippage_sd      = 0.0016   # execution price vs close; always clamped into [low, high]
+daily_noise      = 0.18     # sd of the daily trade count, as a fraction of the mean
+
+# Seasonality multipliers on the daily trade count.
+[trades.seasonality]
+august        = 0.62        # the whole month
+late_december = 0.45        # after the 18th
+quarter_end   = 1.35        # after the 25th of Mar, Jun, Sep, Dec
+
+
+# ---------------------------------------------------------------------------
+# The fee rate card - exported verbatim as commission_schedule.
+# Every segment above must appear here, or check #6 fails.
+# ---------------------------------------------------------------------------
+[fees.Institutional]
+bps     = 4.0
+min_usd = 25.0
+
+[fees.Wholesale]
+bps     = 6.0
+min_usd = 20.0
+
+[fees.Private]
+bps     = 11.0
+min_usd = 12.0
